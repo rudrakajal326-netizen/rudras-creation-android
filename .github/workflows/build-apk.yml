@@ -19,7 +19,7 @@ jobs:
           ZIP_FILE=$(find . -maxdepth 1 -type f \( -name "*.zip" -o -name "*.ZIP" \) | head -n 1)
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "No project ZIP found."
+            echo "ERROR: No Android project ZIP found."
             exit 1
           fi
 
@@ -37,7 +37,7 @@ jobs:
           fi
 
           if [ -z "$PROJECT_DIR" ]; then
-            echo "Android project not found."
+            echo "ERROR: Android project not found inside ZIP."
             exit 1
           fi
 
@@ -48,13 +48,13 @@ jobs:
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: "17"
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v4
         with:
           cmdline-tools-version: 11076708
-          packages: ''
+          packages: ""
           accept-android-sdk-licenses: true
 
       - name: Install Android SDK packages
@@ -74,46 +74,121 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.13'
-        - name: Fix JVM target
+          gradle-version: "8.13"
+
+      - name: Fix JVM target
         working-directory: ${{ env.PROJECT_DIR }}
         shell: bash
         run: |
+          set -e
+
           python3 - <<'PY'
           from pathlib import Path
 
           p = Path("app/build.gradle")
+
+          if not p.exists():
+              raise SystemExit("ERROR: app/build.gradle not found.")
+
           s = p.read_text()
 
+          # Remove previously added JVM configuration blocks
+          import re
+
+          s = re.sub(
+              r'\n\s*compileOptions\s*\{\s*'
+              r'sourceCompatibility\s+JavaVersion\.VERSION_17\s*'
+              r'targetCompatibility\s+JavaVersion\.VERSION_17\s*'
+              r'\}\s*',
+              '\n',
+              s,
+              flags=re.S
+          )
+
+          s = re.sub(
+              r'\n\s*tasks\.withType\(org\.jetbrains\.kotlin\.gradle\.tasks\.KotlinCompile\)'
+              r'\.configureEach\s*\{\s*kotlinOptions\.jvmTarget\s*=\s*"17"\s*\}\s*',
+              '\n',
+              s,
+              flags=re.S
+          )
+
+          # Add Java 17 configuration inside android {}
           if "compileOptions" not in s:
-              s = s.replace(
-                  "android {",
-                  """android {
+              android_index = s.find("android {")
+
+              if android_index == -1:
+                  raise SystemExit("ERROR: android { block not found.")
+
+              insert_at = android_index + len("android {")
+
+              s = (
+                  s[:insert_at]
+                  + """
+
               compileOptions {
                   sourceCompatibility JavaVersion.VERSION_17
                   targetCompatibility JavaVersion.VERSION_17
-              }""",
-                  1
+              }
+              """
+                  + s[insert_at:]
               )
 
-          if "kotlinOptions.jvmTarget" not in s:
-              s += """
-          
+          # Add Kotlin JVM 17 configuration
+          s += """
+
           tasks.withType(org.jetbrains.kotlin.gradle.tasks.KotlinCompile).configureEach {
-              kotlinOptions.jvmTarget = "17"
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
           }
           """
 
           p.write_text(s)
-          print("JVM targets fixed to 17")
+
+          print("JVM target configured successfully:")
+          print("Java sourceCompatibility = 17")
+          print("Java targetCompatibility = 17")
+          print("Kotlin jvmTarget = 17")
           PY
-      - name: Build APK
+
+      - name: Make Gradle wrapper executable
         working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
         run: |
-          gradle assembleDebug --stacktrace
+          chmod +x gradlew
+
+      - name: Clean Gradle build
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          ./gradlew clean --stacktrace
+
+      - name: Build Debug APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          ./gradlew assembleDebug --stacktrace --no-daemon
+
+      - name: Verify APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -e
+
+          APK_COUNT=$(find app/build/outputs/apk/debug -type f -name "*.apk" | wc -l)
+
+          if [ "$APK_COUNT" -eq 0 ]; then
+            echo "ERROR: APK was not generated."
+            exit 1
+          fi
+
+          echo "APK generated successfully:"
+          find app/build/outputs/apk/debug -type f -name "*.apk" -print
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: rudras-creation-debug-apk
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
